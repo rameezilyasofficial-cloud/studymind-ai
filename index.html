@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StudyMind AI v2.0</title>
+    
+    <!-- PWA Manifest Link -->
+    <link rel="manifest" href="./manifest.json">
+    
+    <!-- Theme Color for Browser Bar -->
+    <meta name="theme-color" content="#4f46e5">
+    <link rel="apple-touch-icon" href="icon.png">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Custom Styles -->
+    <style>
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; 
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100">
+    
+    <div id="root">
+        <div class="min-h-screen flex items-center justify-center flex-col gap-4">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+            <p class="text-slate-500 text-sm font-medium">Loading Application...</p>
+        </div>
+    </div>
+
+    <!-- Import Map -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.292.0?external=react"
+        }
+    }
+    </script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- React Application -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            BookOpen, Brain, Sparkles, ShieldCheck, ChevronRight, 
+            CheckCircle, FileText, List, Eye, EyeOff, Upload, AlertTriangle,
+            Image as ImageIcon, FileUp, X, File, Pencil, Save, Key, Settings,
+            History, Trash2, Volume2, Download, ArrowRight, ArrowLeft, LogOut
+        } from 'lucide-react';
+
+        function StudyCompanion() {
+            // -- State Initialization --
+            // Load API key synchronously to gate the UI immediately
+            const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+            const [tempKey, setTempKey] = useState(''); // Used for the Welcome Screen input
+
+            const [activeTab, setActiveTab] = useState('single'); 
+            const [inputText, setInputText] = useState('');
+            const [singleResponse, setSingleResponse] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [mode, setMode] = useState('explain');
+            
+            const [showSettings, setShowSettings] = useState(false);
+            
+            // History State
+            const [history, setHistory] = useState([]);
+            const [showHistory, setShowHistory] = useState(false);
+
+            // Bulk & Upload State
+            const [bulkText, setBulkText] = useState('');
+            const [selectedFile, setSelectedFile] = useState(null);
+            const [quizQuestions, setQuizQuestions] = useState([]);
+            const [processingBulk, setProcessingBulk] = useState(false);
+            const fileInputRef = useRef(null);
+
+            // Load Data from Local Storage (History only, Key is already loaded)
+            useEffect(() => {
+                const storedHistory = localStorage.getItem('study_history');
+                if (storedHistory) {
+                    try {
+                        setHistory(JSON.parse(storedHistory));
+                    } catch (e) {
+                        console.error("Failed to parse history:", e);
+                        // Optional: Clear corrupted history
+                        // localStorage.removeItem('study_history');
+                    }
+                }
+            }, []);
+
+            const saveApiKey = (keyToSave) => {
+                if (!keyToSave.trim()) return;
+                setApiKey(keyToSave);
+                localStorage.setItem('gemini_api_key', keyToSave);
+                setShowSettings(false); // Close settings if open
+            };
+
+            const removeApiKey = () => {
+                if(confirm("This will remove your API Key and return you to the setup screen. Continue?")) {
+                    setApiKey('');
+                    localStorage.removeItem('gemini_api_key');
+                    setShowSettings(false);
+                }
+            }
+
+            const addToHistory = (item) => {
+                // Prevent duplicate consecutive entries if needed, or just push
+                const newHistory = [{ ...item, timestamp: new Date().toISOString(), id: Date.now() }, ...history].slice(0, 50);
+                setHistory(newHistory);
+                localStorage.setItem('study_history', JSON.stringify(newHistory));
+            };
+
+            const clearHistory = () => {
+                if(confirm("Are you sure you want to clear your study history?")) {
+                    setHistory([]);
+                    localStorage.removeItem('study_history');
+                }
+            };
+
+            const loadHistoryItem = (item) => {
+                if (item.type === 'quiz_set') {
+                    // Handle Bulk/Quiz Items
+                    setActiveTab('bulk');
+                    setQuizQuestions(item.questions || []);
+                    // We can't restore the file, but we can restore the text prompt if it existed
+                    if (!item.originalQuery.startsWith('File:')) {
+                        setBulkText(item.originalQuery);
+                    }
+                } else {
+                    // Handle Single Concept Items
+                    setActiveTab('single');
+                    setInputText(item.originalQuery || '');
+                    setSingleResponse(item);
+                }
+                setShowHistory(false);
+            };
+
+            // --- TTS Functionality ---
+            const speakText = (text) => {
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = 1;
+                utterance.pitch = 1;
+                window.speechSynthesis.speak(utterance);
+            };
+
+            // --- Helper: File to Base64 ---
+            const fileToGenerativePart = async (file) => {
+                const base64EncodedDataPromise = new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                    reader.readAsDataURL(file);
+                });
+                return {
+                    inlineData: { data: await base64EncodedDataPromise, mimeType: file.type },
+                };
+            };
+
+            // --- REAL AI: Single Concept ---
+            const generateResponse = async () => {
+                if (!inputText.trim()) return;
+                // Double check key exists (though UI gates it)
+                if (!apiKey) { setApiKey(''); return; }
+
+                setLoading(true);
+                setSingleResponse(null);
+
+                try {
+                    const prompt = mode === 'explain' 
+                        ? `Explain this concept clearly for a student: "${inputText}". Return JSON format: { "content": "explanation text", "tips": ["tip1", "tip2"] }`
+                        : `Provide a hint for this question without giving the answer directly: "${inputText}". Return JSON format: { "content": "hint text", "tips": ["related concept"] }`;
+
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: prompt }] }],
+                            generationConfig: { responseMimeType: "application/json" },
+                            safetySettings: [
+                                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
+                                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+                                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
+                                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" }
+                            ]
+                        })
+                    });
+
+                    const data = await response.json();
+                    
+                    if (data.error) {
+                        throw new Error(data.error.message || "API Error");
+                    }
+
+                    // SAFETY CHECK: Ensure candidates exist before accessing them
+                    if (!data.candidates || data.candidates.length === 0) {
+                         // Check if there is a prompt feedback indicating a block
+                         if (data.promptFeedback && data.promptFeedback.blockReason) {
+                            throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
+                         }
+                         throw new Error("No response was generated. The AI might be overloaded or safety filters blocked the content.");
+                    }
+
+                    const result = JSON.parse(data.candidates[0].content.parts[0].text);
+                    
+                    const responseObj = {
+                        type: mode === 'explain' ? 'explanation' : 'guidance',
+                        content: result.content,
+                        tips: result.tips || [],
+                        originalQuery: inputText
+                    };
+
+                    setSingleResponse(responseObj);
+                    addToHistory(responseObj);
+
+                } catch (error) {
+                    console.error("AI Error:", error);
+                    setSingleResponse({ 
+                        type: 'error', 
+                        content: `Error: ${error.message}. Please check your API Key.`, 
+                        tips: [] 
+                    });
+                }
+                setLoading(false);
+            };
+
+            // --- REAL AI: Bulk / Image Processing ---
+            const processBulkQuestions = async () => {
+                if ((!bulkText.trim() && !selectedFile)) return;
+                if (!apiKey) { setApiKey(''); return; }
+
+                setProcessingBulk(true);
+                
+                try {
+                    let parts = [];
+                    let prompt = `Analyze the provided content (text or image) and identify all multiple choice questions. 
+                    If it is an image, transcribe the questions accurately. 
+                    For each question, identify the correct answer. 
+                    Return ONLY a JSON array with this structure: 
+                    [{ "id": 1, "question": "Question text?", "options": ["A", "B", "C", "D"], "correctAnswerIndex": 0, "explanation": "Why this is correct" }]`;
+
+                    if (bulkText.trim()) {
+                        parts.push({ text: `Here is the text content: ${bulkText}` });
+                    }
+                    if (selectedFile) {
+                        const imagePart = await fileToGenerativePart(selectedFile);
+                        parts.push(imagePart);
+                    }
+                    parts.push({ text: prompt });
+
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: parts }],
+                            generationConfig: { responseMimeType: "application/json" },
+                            safetySettings: [
+                                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
+                                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+                                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
+                                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" }
+                            ]
+                        })
+                    });
+
+                    const data = await response.json();
+                    if(data.error) throw new Error(data.error.message);
+                    
+                    // SAFETY CHECK: Ensure candidates exist before accessing them
+                    if (!data.candidates || data.candidates.length === 0) {
+                        if (data.promptFeedback && data.promptFeedback.blockReason) {
+                            throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
+                         }
+                         throw new Error("No response was generated. The AI might be overloaded or safety filters blocked the content.");
+                    }
+                    
+                    const parsedQuestions = JSON.parse(data.candidates[0].content.parts[0].text);
+                    
+                    // Add IDs if missing
+                    const formattedQuestions = parsedQuestions.map((q, idx) => ({
+                        ...q,
+                        id: idx + 1
+                    }));
+
+                    setQuizQuestions(formattedQuestions);
+
+                    // --- SAVE TO HISTORY ---
+                    const queryLabel = bulkText 
+                        ? (bulkText.length > 50 ? bulkText.substring(0, 50) + "..." : bulkText)
+                        : (selectedFile ? `File: ${selectedFile.name}` : 'Bulk Analysis');
+                    
+                    addToHistory({
+                        type: 'quiz_set',
+                        questions: formattedQuestions,
+                        originalQuery: queryLabel
+                    });
+
+                } catch (error) {
+                    console.error("AI Error:", error);
+                    alert(`Failed to analyze content: ${error.message}`);
+                }
+
+                setProcessingBulk(false);
+            };
+
+            const downloadQuiz = () => {
+                if (quizQuestions.length === 0) return;
+                
+                let textContent = "StudyMind AI - Practice Set\n\n";
+                quizQuestions.forEach(q => {
+                    textContent += `Q${q.id}: ${q.question}\n`;
+                    q.options.forEach((opt, idx) => {
+                        textContent += `   ${['A','B','C','D'][idx]}. ${opt}\n`;
+                    });
+                    textContent += `\nCorrect Answer: ${q.options[q.correctAnswerIndex]}\nExplanation: ${q.explanation}\n\n-------------------\n\n`;
+                });
+
+                const blob = new Blob([textContent], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'study-quiz.txt';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            };
+
+            const handleFileSelect = (e) => {
+                if (e.target.files && e.target.files[0]) {
+                    setSelectedFile(e.target.files[0]);
+                }
+            };
+
+            const clearFile = () => {
+                setSelectedFile(null);
+                if (fileInputRef.current) fileInputRef.current.value = "";
+            };
+
+            // --- WELCOME SCREEN (If No API Key) ---
+            if (!apiKey) {
+                return (
+                    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 animate-in">
+                        <div className="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
+                            <div className="bg-indigo-600 p-8 text-center relative overflow-hidden">
+                                <div className="absolute top-0 left-0 w-full h-full bg-white opacity-5 bg-[radial-gradient(#fff_1px,transparent_1px)] [background-size:16px_16px]"></div>
+                                <div className="relative z-10">
+                                    <div className="bg-white/20 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 backdrop-blur-sm shadow-inner ring-1 ring-white/30">
+                                        <Brain className="w-8 h-8 text-white" />
+                                    </div>
+                                    <h1 className="text-2xl font-bold text-white mb-2 tracking-tight">StudyMind AI</h1>
+                                    <p className="text-indigo-100 text-sm font-medium">Your Personal AI Study Companion</p>
+                                </div>
+                            </div>
+                            
+                            <div className="p-8 space-y-6">
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-1 block">Setup API Key</label>
+                                        <p className="text-xs text-slate-500 leading-relaxed">To start analyzing concepts and generating quizzes, you need a free Google Gemini API key.</p>
+                                    </div>
+                                    <div className="relative group">
+                                        <Key className="absolute left-3 top-3 w-5 h-5 text-slate-400 group-focus-within:text-indigo-500 transition-colors" />
+                                        <input 
+                                            type="password" 
+                                            value={tempKey}
+                                            onChange={(e) => setTempKey(e.target.value)}
+                                            placeholder="Paste AIza..."
+                                            className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all text-sm font-medium text-slate-800"
+                                        />
+                                    </div>
+                                    <div className="flex justify-end">
+                                        <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-xs text-indigo-600 font-bold hover:text-indigo-700 hover:underline flex items-center gap-1">
+                                            Get a free key here <ArrowRight className="w-3 h-3" />
+                                        </a>
+                                    </div>
+                                </div>
+
+                                <button 
+                                    onClick={() => saveApiKey(tempKey)}
+                                    disabled={!tempKey.trim()}
+                                    className={`w-full py-3 rounded-xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 ${!tempKey.trim() ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-indigo-200 hover:-translate-y-0.5'}`}
+                                >
+                                    Get Started <ChevronRight className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                        <p className="mt-6 text-xs text-slate-400 text-center max-w-sm leading-relaxed">
+                            Your API key is stored locally in your browser and is never sent to our servers.
+                        </p>
+                    </div>
+                );
+            }
+
+            // --- MAIN APPLICATION ---
+            return (
+                <div className="min-h-screen pb-12 animate-in relative bg-slate-50">
+                    
+                    {/* Header */}
+                    <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+                        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <div className="bg-indigo-600 p-2 rounded-lg shadow-sm">
+                                    <Brain className="w-6 h-6 text-white" />
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-bold text-slate-800 tracking-tight">StudyMind AI</h1>
+                                    <p className="text-xs text-slate-500 font-medium hidden sm:block">Educational Concept Analyzer</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2 sm:gap-3">
+                                <button 
+                                    onClick={() => setShowHistory(!showHistory)}
+                                    className={`p-2 rounded-full transition-colors ${showHistory ? 'bg-indigo-50 text-indigo-600' : 'text-slate-400 hover:text-indigo-600'}`}
+                                    title="History"
+                                >
+                                    <History className="w-5 h-5" />
+                                </button>
+                                <button 
+                                    onClick={() => setShowSettings(!showSettings)}
+                                    className={`p-2 rounded-full transition-colors ${showSettings ? 'bg-indigo-50 text-indigo-600' : 'text-slate-400 hover:text-indigo-600'}`}
+                                    title="Settings"
+                                >
+                                    <Settings className="w-5 h-5" />
+                                </button>
+                                <div className="hidden sm:flex items-center gap-2 text-xs font-medium text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full border border-emerald-100">
+                                    <ShieldCheck className="w-4 h-4" />
+                                    <span>v2.0 Active</span>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* History Sidebar/Modal */}
+                    {showHistory && (
+                        <div className="fixed inset-0 z-50 flex justify-end bg-black/20 backdrop-blur-sm" onClick={() => setShowHistory(false)}>
+                            <div className="w-80 h-full bg-white shadow-2xl animate-in p-6 flex flex-col" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center justify-between mb-6">
+                                    <h3 className="font-bold text-slate-800 flex items-center gap-2"><History className="w-5 h-5" /> History</h3>
+                                    <button onClick={clearHistory} className="text-slate-400 hover:text-red-500" title="Clear History"><Trash2 className="w-4 h-4" /></button>
+                                </div>
+                                <div className="flex-1 overflow-y-auto space-y-3 pr-2">
+                                    {history.length === 0 ? (
+                                        <p className="text-sm text-slate-400 text-center mt-10">No history yet.</p>
+                                    ) : (
+                                        history.map((item) => (
+                                            <div key={item.id} onClick={() => loadHistoryItem(item)} className="p-3 bg-slate-50 hover:bg-indigo-50 border border-slate-100 rounded-lg cursor-pointer transition-colors group">
+                                                <p className="text-sm font-medium text-slate-800 line-clamp-2">{item.originalQuery}</p>
+                                                <div className="flex justify-between items-center mt-2">
+                                                    <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${item.type === 'quiz_set' ? 'bg-violet-100 text-violet-600' : 'bg-indigo-100 text-indigo-600'}`}>
+                                                        {item.type === 'quiz_set' ? 'Quiz' : 'Concept'}
+                                                    </span>
+                                                    <span className="text-[10px] text-slate-400">{new Date(item.timestamp).toLocaleDateString()}</span>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* API Key Settings Modal (Authenticated View) */}
+                    {showSettings && (
+                        <div className="bg-slate-100 border-b border-slate-200 p-4 animate-in">
+                            <div className="max-w-4xl mx-auto">
+                                <div className="flex items-center justify-between mb-2">
+                                    <label className="block text-xs font-bold text-slate-600 uppercase">Update API Key</label>
+                                    <button onClick={removeApiKey} className="text-xs text-red-500 hover:text-red-700 flex items-center gap-1 font-medium"><LogOut className="w-3 h-3"/> Remove Key & Sign Out</button>
+                                </div>
+                                <div className="flex gap-2">
+                                    <div className="relative flex-1">
+                                        <Key className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                                        <input 
+                                            type="password" 
+                                            value={apiKey}
+                                            onChange={(e) => saveApiKey(e.target.value)}
+                                            className="w-full pl-9 pr-4 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                    </div>
+                                    <button 
+                                        onClick={() => setShowSettings(false)}
+                                        className="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-900"
+                                    >
+                                        Close
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    <main className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+                        <div className="flex gap-4 border-b border-slate-200">
+                            <button onClick={() => setActiveTab('single')} className={`pb-3 px-1 text-sm font-medium flex items-center gap-2 transition-colors relative ${activeTab === 'single' ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}>
+                                <Sparkles className="w-4 h-4" /> Single Concept
+                                {activeTab === 'single' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-full" />}
+                            </button>
+                            <button onClick={() => setActiveTab('bulk')} className={`pb-3 px-1 text-sm font-medium flex items-center gap-2 transition-colors relative ${activeTab === 'bulk' ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}>
+                                <List className="w-4 h-4" /> Bulk Quiz Bank
+                                {activeTab === 'bulk' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-full" />}
+                            </button>
+                        </div>
+
+                        {activeTab === 'single' && (
+                            <div className="space-y-6 animate-in">
+                                <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 flex gap-4">
+                                    <div className="bg-indigo-100 p-2 rounded-full h-fit shrink-0"><BookOpen className="w-5 h-5 text-indigo-600" /></div>
+                                    <div><h2 className="font-semibold text-indigo-900">Concept Analysis</h2><p className="text-sm text-indigo-700 mt-1">Paste a difficult question below to get a breakdown of the logic.</p></div>
+                                </div>
+                                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                    <div className="border-b border-slate-100 bg-slate-50/50 px-4 py-3 flex gap-2">
+                                        <button onClick={() => setMode('explain')} className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${mode === 'explain' ? 'bg-white text-indigo-600 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-700'}`}>Explain Concept</button>
+                                        <button onClick={() => setMode('quiz')} className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${mode === 'quiz' ? 'bg-white text-indigo-600 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-700'}`}>Practice Hint</button>
+                                    </div>
+                                    <div className="p-4">
+                                        <textarea className="w-full h-32 p-3 text-slate-700 placeholder-slate-400 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-sm leading-relaxed transition-all" placeholder="Paste a single question or concept here..." value={inputText} onChange={(e) => setInputText(e.target.value)} />
+                                        <div className="mt-4 flex justify-end">
+                                            <button onClick={generateResponse} disabled={loading || !inputText.trim()} className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white transition-all transform active:scale-95 ${loading || !inputText.trim() ? 'bg-slate-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 shadow-md hover:shadow-lg'}`}>{loading ? "Analyzing..." : "Analyze"}</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {singleResponse && (
+                                    <div className="bg-white rounded-xl border border-slate-200 shadow-lg overflow-hidden animate-in">
+                                        <div className="bg-gradient-to-r from-indigo-600 to-violet-600 px-6 py-4 flex justify-between items-center">
+                                            <h3 className="text-white font-semibold flex items-center gap-2"><Brain className="w-5 h-5" /> AI Analysis</h3>
+                                            <button onClick={() => speakText(singleResponse.content)} className="text-indigo-100 hover:text-white p-1 hover:bg-white/10 rounded-full transition-colors" title="Listen">
+                                                <Volume2 className="w-5 h-5" />
+                                            </button>
+                                        </div>
+                                        <div className="p-6 space-y-6">
+                                            <p className="whitespace-pre-wrap leading-relaxed text-slate-700 text-sm">{singleResponse.content}</p>
+                                            
+                                            {/* Tips Section */}
+                                            {singleResponse.tips && singleResponse.tips.length > 0 && (
+                                                <div className="bg-amber-50 border border-amber-100 rounded-lg p-4">
+                                                    <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wide mb-3 flex items-center gap-2">
+                                                        <CheckCircle className="w-4 h-4" /> Study Tips
+                                                    </h4>
+                                                    <ul className="space-y-2">
+                                                        {singleResponse.tips.map((tip, index) => (
+                                                            <li key={index} className="flex items-start gap-2 text-sm text-amber-900">
+                                                                <ChevronRight className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
+                                                                <span>{tip}</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'bulk' && (
+                            <div className="space-y-6 animate-in">
+                                {quizQuestions.length === 0 && (
+                                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                        <div className="p-6">
+                                            <div className="flex items-center gap-3 mb-4">
+                                                <div className="bg-violet-100 p-2 rounded-lg"><FileText className="w-5 h-5 text-violet-600" /></div>
+                                                <div><h3 className="font-semibold text-slate-800">Bulk Upload</h3><p className="text-xs text-slate-500">Upload documents, images, or paste text.</p></div>
+                                            </div>
+                                            
+                                            {/* File Upload Area */}
+                                            <div className="mb-4">
+                                                <input 
+                                                    type="file" 
+                                                    ref={fileInputRef}
+                                                    onChange={handleFileSelect}
+                                                    className="hidden" 
+                                                    accept=".txt,.pdf,.doc,.docx,.jpg,.png"
+                                                />
+                                                {!selectedFile ? (
+                                                    <div 
+                                                        onClick={() => fileInputRef.current?.click()}
+                                                        className="border-2 border-dashed border-slate-300 rounded-xl p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:bg-slate-50 hover:border-indigo-400 transition-all group"
+                                                    >
+                                                        <div className="bg-indigo-50 p-3 rounded-full mb-3 group-hover:scale-110 transition-transform">
+                                                            <FileUp className="w-6 h-6 text-indigo-600" />
+                                                        </div>
+                                                        <p className="text-sm font-semibold text-slate-700">Click to upload document or image</p>
+                                                        <p className="text-xs text-slate-400 mt-1">Supports PDF, DOCX, TXT, JPG, PNG</p>
+                                                    </div>
+                                                ) : (
+                                                    <div className="border border-indigo-100 bg-indigo-50 rounded-xl p-4 flex items-center justify-between">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="bg-white p-2 rounded-lg border border-indigo-100">
+                                                                {selectedFile.type.startsWith('image/') ? <ImageIcon className="w-5 h-5 text-indigo-600"/> : <File className="w-5 h-5 text-indigo-600"/>}
+                                                            </div>
+                                                            <div>
+                                                                <p className="text-sm font-semibold text-indigo-900">{selectedFile.name}</p>
+                                                                <p className="text-xs text-indigo-600">{(selectedFile.size / 1024).toFixed(1)} KB</p>
+                                                            </div>
+                                                        </div>
+                                                        <button onClick={clearFile} className="p-1 hover:bg-white rounded-full text-indigo-400 hover:text-red-500 transition-colors">
+                                                            <X className="w-5 h-5" />
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="relative">
+                                                <div className="absolute inset-0 flex items-center">
+                                                    <div className="w-full border-t border-slate-200"></div>
+                                                </div>
+                                                <div className="relative flex justify-center text-xs uppercase">
+                                                    <span className="bg-white px-2 text-slate-400 font-medium">Or paste text</span>
+                                                </div>
+                                            </div>
+
+                                            <textarea className="w-full h-32 mt-4 p-4 text-slate-700 placeholder-slate-400 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-sm font-mono leading-relaxed transition-all" placeholder={`Paste questions here...`} value={bulkText} onChange={(e) => setBulkText(e.target.value)} />
+                                            
+                                            <div className="mt-4 flex justify-end">
+                                                <button onClick={processBulkQuestions} disabled={processingBulk || (!bulkText.trim() && !selectedFile)} className={`flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold text-white transition-all transform active:scale-95 ${processingBulk || (!bulkText.trim() && !selectedFile) ? 'bg-slate-300 cursor-not-allowed' : 'bg-violet-600 hover:bg-violet-700 shadow-md hover:shadow-lg'}`}>{processingBulk ? "Processing..." : (<><Upload className="w-4 h-4" /> Generate Quiz Bank</>)}</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                {quizQuestions.length > 0 && (
+                                    <div className="space-y-4">
+                                        <div className="flex flex-wrap items-center justify-between gap-4">
+                                            <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                                Generated Practice Set
+                                                <span className="bg-slate-100 text-slate-500 text-xs px-2 py-0.5 rounded-full">{quizQuestions.length} Qs</span>
+                                            </h3>
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={downloadQuiz} className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-semibold hover:bg-slate-50 hover:text-indigo-600 transition-colors"><Download className="w-4 h-4" /> Export</button>
+                                                <button onClick={() => { setQuizQuestions([]); setBulkText(''); setSelectedFile(null); }} className="text-xs text-slate-400 hover:text-red-500 font-medium px-2">Clear</button>
+                                            </div>
+                                        </div>
+                                        
+                                        {/* Simple List View */}
+                                        <div className="grid gap-4 animate-in">
+                                            {quizQuestions.map((q) => (<QuizCard key={q.id} data={q} />))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        function QuizCard({ data }) {
+            const [showAnswer, setShowAnswer] = useState(false);
+            const [isEditing, setIsEditing] = useState(false);
+            const [editedQuestion, setEditedQuestion] = useState(data.question);
+            const [editedOptions, setEditedOptions] = useState(data.options);
+
+            const handleOptionChange = (idx, value) => {
+                const newOptions = [...editedOptions];
+                newOptions[idx] = value;
+                setEditedOptions(newOptions);
+            };
+
+            const toggleEdit = () => {
+                setIsEditing(!isEditing);
+            }
+
+            return (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow duration-200 overflow-hidden relative group">
+                    <div className="absolute top-4 right-4 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+                         <button onClick={toggleEdit} className="p-2 bg-slate-100 hover:bg-indigo-100 text-slate-500 hover:text-indigo-600 rounded-lg transition-colors" title={isEditing ? "Save Changes" : "Edit Question"}>
+                            {isEditing ? <Save className="w-4 h-4"/> : <Pencil className="w-4 h-4"/>}
+                         </button>
+                    </div>
+
+                    <div className="p-5">
+                        <div className="flex gap-3">
+                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-slate-100 text-slate-500 text-xs font-bold shrink-0">{data.id}</span>
+                            {isEditing ? (
+                                <textarea className="w-full text-sm font-semibold text-slate-800 border border-indigo-200 rounded p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" value={editedQuestion} onChange={(e) => setEditedQuestion(e.target.value)} rows={2} />
+                            ) : (
+                                <h4 className="font-semibold text-slate-800 text-sm leading-snug pt-0.5">{editedQuestion}</h4>
+                            )}
+                        </div>
+                        <div className="mt-4 ml-9 space-y-2">
+                            {editedOptions.map((opt, idx) => {
+                                const isCorrect = idx === data.correctAnswerIndex;
+                                return (
+                                    <div key={idx} className={`flex items-center gap-3 p-3 rounded-lg border transition-all duration-300 ${!isEditing && showAnswer && isCorrect ? 'bg-emerald-50 border-emerald-300 shadow-sm' : 'border-slate-100 bg-slate-50'}`}>
+                                        <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors duration-300 ${!isEditing && showAnswer && isCorrect ? 'border-emerald-500 bg-emerald-500' : 'border-slate-300'}`}>{!isEditing && showAnswer && isCorrect && <div className="w-2 h-2 bg-white rounded-full" />}</div>
+                                        {isEditing ? (
+                                            <input type="text" className="w-full text-sm text-slate-600 bg-transparent border-b border-indigo-200 focus:outline-none focus:border-indigo-500" value={opt} onChange={(e) => handleOptionChange(idx, e.target.value)} />
+                                        ) : (
+                                            <span className={`text-sm ${showAnswer && isCorrect ? 'text-emerald-900 font-bold' : 'text-slate-600'}`}>{opt}</span>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div className="mt-4 ml-9 flex gap-3">
+                            <button onClick={() => setShowAnswer(!showAnswer)} className="text-xs font-medium text-emerald-600 bg-emerald-50 hover:bg-emerald-100 border border-emerald-100 px-4 py-2 rounded-lg transition-colors flex items-center gap-2">{showAnswer ? (<><EyeOff className="w-3 h-3" /> Hide Answer</>) : (<><CheckCircle className="w-3 h-3" /> Reveal Correct Answer</>)}</button>
+                            {data.explanation && showAnswer && (
+                                <div className="mt-3 p-3 bg-emerald-50 border border-emerald-100 rounded-lg w-full animate-in">
+                                    <p className="text-xs text-emerald-800 font-medium"><span className="font-bold">Explanation:</span> {data.explanation}</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<StudyCompanion />);
+    </script>
+    
+    <!-- PWA Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(registration => console.log('SW Registered'))
+                    .catch(err => console.log('SW Failed', err));
+            });
+        }
+    </script>
+</body>
+</html>
